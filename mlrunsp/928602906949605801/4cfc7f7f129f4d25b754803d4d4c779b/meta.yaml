@@ -1,0 +1,14 @@
+artifact_uri: /home/agiannoul/Desktop/gitProjects/mypandora/piblicMlflow/mlruns/928602906949605801/4cfc7f7f129f4d25b754803d4d4c779b/artifacts
+end_time: 1769783371304
+entry_point_name: ''
+experiment_id: '928602906949605801'
+lifecycle_stage: active
+run_id: 4cfc7f7f129f4d25b754803d4d4c779b
+run_name: capable-auk-759
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1769783371213
+status: 3
+tags: []
+user_id: agiannoul

@@ -1,0 +1,35 @@
+*.csv
+*.parquet
+
+.vscode/*
+*.xlsx
+catboost_info/*
+# Ignore Python compiled files
+*.pyc
+*.pyo
+*/__pycache__/
+
+# Ignore .pickle and .pkl files
+*.pickle
+*.pkl
+
+# Ignore .npy files (NumPy arrays)
+*.npy
+
+# Ignore PyCharm project files
+.idea/
+mlrunsALL/
+mlruns/
+!runtime_res.pkl
+*.iml
+*.ipr
+*.iws
+*.db
+*.csv
+*.pred
+*.real
+
+logs/*
+pids/*
+
+*.zip
