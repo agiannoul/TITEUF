@@ -33,3 +33,5 @@ logs/*
 pids/*
 
 *.zip
+
+!results.csv

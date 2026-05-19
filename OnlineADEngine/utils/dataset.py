@@ -262,9 +262,46 @@ class Dataset:
             else:
                 test_source.append(source)
         return train_source, val_source, test_source
-    def get_rul_dataset(self,keep_sources=None):
-        concatinated_train = pd.concat([df for df in self.train_dfs if self.rtf_dict[df.iloc[0][self.source_column]]==1], ignore_index=True)
 
+    def get_rul_dataset(self, keep_sources=None):
+        """Generate RUL (Remaining Useful Life) prediction dataset.
+
+        Creates training, validation, and testing datasets optimized for RUL regression tasks.
+        Uses only run-to-failure episodes for training and generates RUL labels indicating
+        time remaining until failure.
+
+        Parameters
+        ----------
+        keep_sources : str, optional
+            If provided, preserves this column (e.g., 'source') in the dataset
+            for source tracking. Otherwise, removes source and RUL columns.
+
+        Returns
+        -------
+        tuple[dict, dict]
+            (dataset, test_dataset) - Two dictionaries containing:
+            - 'match_sources': Source mapping for transfer learning
+            - 'target_sources': Sources used for validation/testing
+            - 'target_data': Feature data for val/test
+            - 'target_labels': RUL values (time to failure) for val/test
+            - 'is_failure': Whether each source had failures
+            - 'historic_data': Training data (run-to-failure episodes only)
+            - 'historic_sources': Source names for training data
+            - 'anomaly_labels': RUL labels for training data
+            - 'predictive_horizon': Time window before failure
+            - 'slide': Sliding window step size
+            - 'lead': Lead time for predictions
+            - 'beta': Objective weighting parameter
+
+        Examples
+        --------
+        >>> dataset_obj = Dataset(data, 'timestamp', failure_column='is_failure')
+        >>> train_set, test_set = dataset_obj.get_rul_dataset()
+        >>> # Access training RUL data
+        >>> rul_labels = train_set['anomaly_labels'][0]
+        """
+        concatinated_train = pd.concat(
+            [df for df in self.train_dfs if self.rtf_dict[df.iloc[0][self.source_column]] == 1], ignore_index=True)
 
         cols_to_drop = [self.source_column, self.rul_column]
 
@@ -275,20 +312,19 @@ class Dataset:
         dataset['match_sources'] = self.matches
         dataset['target_sources'] = [str(vid) for vid in self.sources_for_val]
 
-        target_data=[]
+        target_data = []
         for df in self.val_dfs:
-            tdf=df.copy()
-            tdf=tdf.drop(columns=cols_to_drop).reset_index(drop=True).copy()
+            tdf = df.copy()
+            tdf = tdf.drop(columns=cols_to_drop).reset_index(drop=True).copy()
             if keep_sources is not None:
-                tdf[keep_sources]=df[self.source_column]
+                tdf[keep_sources] = df[self.source_column]
             target_data.append(tdf)
         dataset['target_data'] = target_data
         dataset['is_failure'] = [self.rtf_dict[str(vid)] for vid in self.sources_for_val]
         dataset['target_labels'] = [df[self.rul_column].values for df in self.val_dfs]
 
-
         if keep_sources is not None:
-            concatinated_train[keep_sources]=[s for s in concatinated_train[self.source_column]]
+            concatinated_train[keep_sources] = [s for s in concatinated_train[self.source_column]]
         dataset['historic_data'] = [concatinated_train.drop(columns=cols_to_drop)]
         dataset['historic_sources'] = [self.train_source_name]
         dataset['anomaly_labels'] = [concatinated_train[self.rul_column].values]
@@ -318,14 +354,13 @@ class Dataset:
         target_data = []
         for df in self.test_dfs:
             tdf = df.copy()
-            tdf= tdf.drop(columns=cols_to_drop).reset_index(drop=True).copy()
+            tdf = tdf.drop(columns=cols_to_drop).reset_index(drop=True).copy()
             if keep_sources is not None:
                 tdf[keep_sources] = df[self.source_column]
             target_data.append(tdf)
         test_dataset['target_data'] = target_data
         test_dataset['target_labels'] = [df[self.rul_column].values for df in self.test_dfs]
         test_dataset['is_failure'] = [self.rtf_dict[str(vid)] for vid in self.sources_for_test]
-
 
         if keep_sources is not None:
             concatinated_train[keep_sources] = [s for s in concatinated_train[self.source_column]]
@@ -352,6 +387,31 @@ class Dataset:
         return y
 
     def get_SA_dataset(self,keep_sources=None):
+        """Generate Survival Analysis dataset with reliability labels.
+
+        Creates datasets for survival regression tasks where the goal is to predict
+        survival probabilities or remaining time until events. Combines all training
+        episodes and marks event indicators (failure/maintenance).
+
+        Parameters
+        ----------
+        keep_sources : str, optional
+            If provided, preserves this column for source tracking.
+
+        Returns
+        -------
+        tuple[dict, dict]
+            (dataset, test_dataset) - Dictionaries containing:
+            - 'target_labels': Tuples of (RUL, event_indicator) for each sample
+            - 'anomaly_labels': Tuples of (RUL, event_flag) for training
+            - Other fields same as get_rul_dataset()
+
+        Notes
+        -----
+        - Survival analysis labels are tuples (time, event) used by survival methods
+        - Event indicator: 1 for failure, 0 for maintenance/reset
+        - Combines event information from the rtf_dict (run-to-failure mapping)
+        """
         train_dfs_with_events=[]
         for df in self.train_dfs:
             df_with_event=df.copy()

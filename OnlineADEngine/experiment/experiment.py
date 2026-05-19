@@ -16,9 +16,11 @@ import mlflow
 import uuid
 
 from matplotlib import cm
+from sksurv.metrics import integrated_brier_score, brier_score
 
 from OnlineADEngine.pipeline.pipeline import PdMPipeline
 from OnlineADEngine.utils.rul_transformations import hard_transform_survival, sigmoid_survival_batch
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
 logging.basicConfig(level=logging.INFO)
 
@@ -249,8 +251,9 @@ class PdMExperiment(abc.ABC):
                 counter = 0
 
     def _plot_RUL(self, plot_dictionary) -> None:
-        plt.figure(figsize=(20, 20))
         if self.debug:
+            plt.figure(figsize=(20, 20))
+
             counter = 0
             namescount = -1
             # plot_rul_dictionary[current_target_source]={"scores":processed_target_scores,"labels":current_labels,"thresholds":None,"index":current_dates}
@@ -292,10 +295,10 @@ class PdMExperiment(abc.ABC):
         plt.plot(xaxisvalue, yaxisvalue, "-o")
         plt.tight_layout()
         mlflow.log_figure(plt.gcf(), 'pr_curve.png')
-
         plt.clf()
-        plt.figure(figsize=(20, 20))
+
         if self.debug:
+            plt.figure(figsize=(20, 20))
             counter = 0
             namescount = -1
             prelimit = 0
@@ -466,10 +469,23 @@ class PdMExperiment(abc.ABC):
         mdape_per_bin = {"time": [bt[0] for bt in mdape_per_bin], "MdAPE": [br[1] for br in mdape_per_bin]}
         return mape_per_bin, mdape_per_bin
 
+
+    def inner_rul_metrics(self,prefic,labels_for_rul, flatten_for_rul):
+        inner_best_dict = {}
+        inner_best_dict[f'mse_{prefic}'] = mean_squared_error(labels_for_rul, flatten_for_rul)
+        inner_best_dict[f'r2_{prefic}'] = r2_score(labels_for_rul, flatten_for_rul)
+        inner_best_dict[f'mae_{prefic}'] = mean_absolute_error(labels_for_rul, flatten_for_rul)
+        inner_best_dict[f'rmse_{prefic}'] = root_mean_squared_error(labels_for_rul, flatten_for_rul)
+        inner_best_dict[f'mape_{prefic}'] = mean_absolute_percentage_error([l + 1 for l in labels_for_rul],
+                                                           [p + 1 for p in flatten_for_rul])
+        inner_best_dict[f'mdape_{prefic}'] = self.mdape([l + 1 for l in labels_for_rul], [p + 1 for p in flatten_for_rul])
+        return inner_best_dict
+
+
+
     def surv_evaluate(self, results_rul, result_scores, result_dates, result_labels, train_labels, plot_dictionary,
                       rtfs):
         # TODO: incorporate for censored data as well, now only for RTF
-        from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
         flatten_preds = []
         flatten_labels = []
@@ -500,12 +516,38 @@ class PdMExperiment(abc.ABC):
         test_preds = []
         for pred in result_scores:
             test_preds.extend([inpred[0] for inpred in pred])
-
         times = np.unique([ty for ty in train_flatten_labels])
+        if len(times)>len(test_preds[0]):
+            times=times[len(times)-len(test_preds[0]):]
         times.sort()
         test_y = [(rtf, ty) for ty, rtf in zip(flatten_labels, is_rtf)]
 
-        eval_survs = self.surv_eval(test_y, test_preds, times=times, train_y=None)
+        test_y_without_censored = [obs for obs in test_y if obs[0] == 1]
+        test_preds_without_censored = np.array([inpred for obs, inpred in zip(test_y, test_preds) if obs[0] == 1])
+
+        flatten_for_rul_05=self.ISD_to_RUL_t05(test_preds_without_censored, times)
+        th_05_Res=self.inner_rul_metrics("t05", labels_for_rul, flatten_for_rul_05)
+        for key in th_05_Res:
+            best_dict[key]=th_05_Res[key]
+
+
+        flatten_for_rul_E=self.ISD_to_RUL_tE(test_preds_without_censored, times)
+        th_E_Res=self.inner_rul_metrics("tE", labels_for_rul, flatten_for_rul_E)
+        for key in th_E_Res:
+            best_dict[key]=th_E_Res[key]
+
+        flatten_for_rul_PDF_peak=self.ISD_to_RUL_PDF_peak(test_preds_without_censored, times)
+        th_PDF_Res=self.inner_rul_metrics("tPDF", labels_for_rul, flatten_for_rul_PDF_peak)
+        for key in th_PDF_Res:
+            best_dict[key]=th_PDF_Res[key]
+
+
+
+        eval_survs = self.surv_eval(test_y_without_censored, test_preds_without_censored, times=times, train_y=None)
+        eval_survs_with_Cens = self.surv_eval(test_y, test_preds, times=times, train_y=None, all=False)
+        for key in eval_survs_with_Cens.keys():
+            eval_survs[f"{key}_cen"]=eval_survs_with_Cens[key]
+
         eval_survs['mape_bins'] = mape_bins
         eval_survs['mdape_bins'] = mdape_bins
         if self.debug:
@@ -519,13 +561,12 @@ class PdMExperiment(abc.ABC):
             else:
                 best_dict[key] = eval_survs[key]
 
-        # MdAPE stored in  best_dict['mdape']
-        # IBS stored in best_dict['IBS']
-        inverted_mdape = 1 - min(1, best_dict['mdape'])
-        inverted_ibs = 1 - 4 * min(0.25, best_dict['IBS'])
         beta = 1
-        best_dict['CombinedScore'] = (1 + beta ** 2) * inverted_mdape * inverted_ibs / (
-                    beta ** 2 * inverted_mdape + inverted_ibs)
+        best_dict['CombinedScore'] = self.TEF(beta,best_dict['mdape'], best_dict['IBS'])
+        best_dict['CombinedScore_cen'] = self.TEF(beta,best_dict['mdape'], best_dict['IBS_cen'])
+
+        best_dict['CombinedScore2'] = self.TEF_2(beta, best_dict['mdape'], best_dict['IBS'])
+        best_dict['CombinedScore2_cen'] = self.TEF_2(beta, best_dict['mdape'], best_dict['IBS_cen'])
         mlflow.log_metrics(best_dict)
 
 
@@ -533,7 +574,70 @@ class PdMExperiment(abc.ABC):
 
         return best_dict
 
-    def surv_eval(self, test_y, test_preds, times=None, train_y=None):
+    def ISD_to_RUL_t05(self, surv_preds, times):
+        # for each prediction find the time at which the survival probability drops below 0.5 and return that time as the predicted RUL
+        predicted_rul = []
+        for surv_pred in surv_preds:
+            pred_time = None
+            for prob, time in zip(surv_pred, times):
+                if prob < 0.5:
+                    pred_time = time
+                    break
+            if pred_time is None:
+                pred_time = times[-1]
+            predicted_rul.append(pred_time)
+        return predicted_rul
+
+    def ISD_to_RUL_tE(self, surv_preds, times):
+        """
+            Expected RUL = integral of S(t) dt
+            Works with non-uniform time steps.
+
+            times: list or array of time points (increasing)
+            survival: list or array of S(t) values
+            """
+        predicted_rul = []
+        for surv_pred in surv_preds:
+            times = np.asarray(times)
+            survival = np.asarray(surv_pred)
+            # trapezoidal integration
+            rul = np.trapz(survival, times)
+            predicted_rul.append(float(rul))
+        return predicted_rul
+
+    def ISD_to_RUL_PDF_peak(self, surv_preds, times):
+        #     RUL = time of maximum failure probability (mode of PDF)
+        predicted_rul = []
+        for surv_pred in surv_preds:
+            times = np.asarray(times)
+            survival = np.asarray(surv_pred)
+
+            # numerical derivative: p(t) ≈ -dS/dt
+            dt = np.diff(times)
+            dS = np.diff(survival)
+
+            pdf = -dS / dt  # approximate density
+
+            # use midpoints for time alignment
+            mid_times = (times[:-1] + times[1:]) / 2
+
+            # argmax of PDF
+            idx = np.argmax(pdf)
+            predicted_rul.append(float(mid_times[idx]))
+        return predicted_rul
+
+    def TEF(self,beta,mdape,ibs):
+        inverted_mdape = 1 - min(1, mdape)
+        inverted_ibs = 1 - 4 * min(0.25, ibs)
+        return (1 + beta ** 2) * inverted_mdape * inverted_ibs / (beta ** 2 * inverted_mdape + inverted_ibs)
+
+    def TEF_2(self,beta,mdape,ibs):
+        inverted_mdape = 1 - min(1, mdape)
+        inverted_ibs = 1 - min(1, ibs)
+        return (1 + beta ** 2) * inverted_mdape * inverted_ibs / (beta ** 2 * inverted_mdape + inverted_ibs)
+
+
+    def surv_eval(self, test_y, test_preds, times=None, train_y=None, all=True):
         """
         test_y: structured array with (event, time) shape: (nsamples)
         test_preds: array of shape: (nsamples, ntimes) with predicted survival probabilities
@@ -549,7 +653,7 @@ class PdMExperiment(abc.ABC):
             new_test_y = []
             new_test_preds = []
             for ty, preds_i in zip(test_y, test_preds):
-                new_test_y.append(ty)
+                new_test_y.append((ty[0]==1, ty[1]))
                 new_test_preds.append(preds_i)
             test_y = new_test_y
             test_y = np.array(test_y, dtype=[('event', 'bool'), ('time', 'float')])
@@ -574,36 +678,45 @@ class PdMExperiment(abc.ABC):
         times = times[pos_pre:pos]
         test_preds = test_preds[:, pos_pre:pos]
 
-        b_times, b_score = brier_score(train_y, test_y, test_preds, times)
-        integrated_brier_score_value = integrated_brier_score(train_y, test_y, test_preds, times)
+        if all==False:
+            IBS, b_times, b_score= self.metrics_with_censored_data(times, None, test_y,test_preds=test_preds)
 
-        roc_pt, mean_roc = cumulative_dynamic_auc(train_y, test_y, -test_preds, times)
+            evals = {}
+            evals['IBS'] = IBS
+            evals['Max_brier'] = np.max(b_score)
+        else:
+            b_times, b_score = brier_score(train_y, test_y, test_preds, times)
+            integrated_brier_score_value = integrated_brier_score(train_y, test_y, test_preds, times)
+            evals = {}
+            evals['IBS'] = integrated_brier_score_value
+            evals['Max_brier'] = np.max(b_score)
+        if all:
+            roc_pt, mean_roc = cumulative_dynamic_auc(train_y, test_y, -test_preds, times)
 
-        evals = {}
-        # do it in 20 time points evenly spaced
-        target_times = np.linspace(times.min(), times.max(), 20)
-        positions = [np.argmin(np.abs(times - t)) for t in target_times]
-        cis = []
-        events = [ty[0] for ty in test_y]
-        times_for_c = [ty[1] for ty in test_y]
 
-        # res = concordance_index_censored(events, times_for_c, [max_rul - pred_rul for pred_rul in flatten_preds])
-        for i in positions:
-            res = concordance_index_censored(events, times_for_c, [1 - tpred for tpred in test_preds[:, i]])
-            cis.append((times_for_c[i], res[0]))
-        summaris = [np.sum(test_preds[i, :]) for i in range(len(test_preds))]
-        maxsum = max(summaris)
-        sumres = concordance_index_censored(events, times_for_c, [maxsum - summm for summm in summaris])
-        cis.append((-1, sumres[0]))  # add last time point again
-        # mean_ic = np.mean([ci[1] for ci in cis])
-        evals['brier_scores'] = {"time": [bt for bt in b_times], "Brier": [br for br in b_score]}
-        evals['roc_auc_list'] = {"time": [bt for bt in times], "ROC": [br for br in roc_pt]}
-        evals['c_index_list'] = {"time": [ci[0] for ci in cis], "C-Index": [ci[1] for ci in cis]}
-        evals['c_index_mean'] = np.mean([ci[1] for ci in cis])
-        evals['c_index'] = np.max([ci[1] for ci in cis])
-        evals['IBS'] = integrated_brier_score_value
-        evals['Max_brier'] = np.max(b_score)
-        evals['mean_roc'] = mean_roc
+            # do it in 20 time points evenly spaced
+            target_times = np.linspace(times.min(), times.max(), 10)
+            positions = [np.argmin(np.abs(times - t)) for t in target_times]
+            cis = []
+            events = [ty[0] for ty in test_y]
+            times_for_c = [ty[1] for ty in test_y]
+
+            # res = concordance_index_censored(events, times_for_c, [max_rul - pred_rul for pred_rul in flatten_preds])
+            # for i in positions:
+            #     res = concordance_index_censored(events, times_for_c, [1 - tpred for tpred in test_preds[:, i]])
+            #     cis.append((times_for_c[i], res[0]))
+            summaris = [np.sum(test_preds[i, :]) for i in range(len(test_preds))]
+            maxsum = max(summaris)
+            sumres = concordance_index_censored(events, times_for_c, [maxsum - summm for summm in summaris])
+            cis.append((-1, sumres[0]))  # add last time point again
+            # mean_ic = np.mean([ci[1] for ci in cis])
+            evals['brier_scores'] = {"time": [bt for bt in b_times], "Brier": [br for br in b_score]}
+            evals['roc_auc_list'] = {"time": [bt for bt in times], "ROC": [br for br in roc_pt]}
+            # evals['c_index_list'] = {"time": [ci[0] for ci in cis], "C-Index": [ci[1] for ci in cis]}
+            evals['c_index_mean'] = np.mean([ci[1] for ci in cis])
+            evals['c_index'] = np.max([ci[1] for ci in cis])
+
+            evals['mean_roc'] = mean_roc
         # evals['IBR_bins']=self.IBR_bins(train_y, test_y, test_preds, times, n=10)
 
         return evals
@@ -689,6 +802,9 @@ class PdMExperiment(abc.ABC):
 
         eval_survs, max_rul = self.surv_eval_for_rul(test_y, flatten_preds, result_scores, result_labels, rtfs,
                                                      times=times, train_y=None)
+
+
+
         eval_survs['mape_bins'] = mape_bins
         eval_survs['mdape_bins'] = mdape_bins
 
@@ -700,17 +816,62 @@ class PdMExperiment(abc.ABC):
             else:
                 best_dict[key] = eval_survs[key]
 
-        # MdAPE stored in  best_dict['mdape']
-        # IBS stored in best_dict['IBS']
-        inverted_mdape=1-min(1, best_dict['mdape'])
-        inverted_ibs=1-4*min(0.25, best_dict['IBS'])
+
         beta=1
-        best_dict['CombinedScore'] = (1+beta**2)*inverted_mdape*inverted_ibs/(beta**2*inverted_mdape+inverted_ibs)
+        best_dict['CombinedScore'] = self.TEF(beta,best_dict['mdape'], best_dict['IBS'])
+        best_dict['CombinedScore_cen'] = self.TEF(beta,best_dict['mdape'], best_dict['IBS_cen'])
+
+        best_dict['CombinedScore2'] = self.TEF_2(beta, best_dict['mdape'], best_dict['IBS'])
+        best_dict['CombinedScore2_cen'] = self.TEF_2(beta, best_dict['mdape'], best_dict['IBS_cen'])
         mlflow.log_metrics(best_dict)
 
         return best_dict
 
-    # def surv_eval(self,result_scores, result_dates,result_labels, plot_dictionary):
+    def metrics_with_censored_data(self,times,flatten_preds,test_y,test_preds=None):
+        # test_y must be a structured array with the first field being a binary class event indicator and the second field the time of the event/censoring
+        # test_preds has shape (nsamples, ntimes) and contains survival probabilities for each sample at each time point in times
+        if test_preds is None:
+            test_preds = sigmoid_survival_batch(times, flatten_preds, tau=max(times) / 100)
+        else:
+            test_preds = np.array(test_preds)
+
+        # 2. random split (50-50)
+        n = len(test_y)
+        rng = np.random.default_rng(42)
+        idx = rng.permutation(n)
+
+        split = n // 2
+        idx_G = idx[:split]  # for G(t)
+        idx_eval = idx[split:]  # for evaluation
+
+        survival_G = test_y[idx_G]
+        survival_eval = test_y[idx_eval]
+        preds_eval = test_preds[idx_eval]
+
+        t_min = np.min(survival_eval["time"])
+        t_max = np.percentile(survival_eval["time"], 70)
+
+        mask = (times >= t_min) & (times < t_max)
+        times_valid = times[mask]
+        preds_eval_valid = preds_eval[:, :len(times_valid)]
+
+        # 4. IBS
+        IBS_cen = integrated_brier_score(
+            survival_G,
+            survival_eval,
+            preds_eval_valid,
+            times_valid
+        )
+
+        b_times, b_score = brier_score(
+            survival_G,
+            survival_eval,
+            preds_eval_valid,
+            times_valid
+        )
+
+        return IBS_cen, b_times, b_score
+
     def surv_eval_for_rul(self, test_y, flatten_preds, result_scores, result_labels, is_failure, times=None,
                           train_y=None):
 
@@ -733,7 +894,8 @@ class PdMExperiment(abc.ABC):
         flatten_preds = np.array(new_flatten_preds)
 
         if train_y is None:
-            train_y = np.array(test_y, dtype=[('event', 'bool'), ('time', 'float')])
+            train_y = np.array([ty for ty in test_y if ty[0]==1], dtype=[('event', 'bool'), ('time', 'float')])
+
             # and keep only fatal
 
         if times is None:
@@ -764,29 +926,83 @@ class PdMExperiment(abc.ABC):
         res = concordance_index_censored(events, times_for_c, [max_rul - pred_rul for pred_rul in flatten_preds])
         evals['c_index'] = res[0]
 
-        test_preds = hard_transform_survival(times, flatten_preds)
+
 
         plot_test_preds = []
         for pred_set in result_scores:
             plot_test_preds.append([[predss, times] for predss in sigmoid_survival_batch(times, pred_set, tau=max(times)/100)])
         self.plot_SA_of_RUL(plot_test_preds, result_labels, is_failure)
 
-        b_times, b_score = brier_score(train_y, test_y, test_preds, times)
+        ############# WITH CENSORED :
+        IBS_cen, b_times_cen, b_score_cen =self.metrics_with_censored_data(times,flatten_preds,test_y)
+        evals['IBS_cen'] = IBS_cen
+        evals['Max_brier_cen'] = np.max(b_score_cen)
+
+
+        ############# WITHOUT CENSORED :
+        test_y_without_censored = np.array([obs for obs in test_y if obs[0] == 1])
+        maxpred=max([ty[1] for ty in train_y])
+        minpred=min([ty[1] for ty in train_y])
+        flatten_preds=[min(pred,maxpred) for pred in flatten_preds]
+        times=[t for t in times if t<maxpred and t>minpred]
+        # HARD MAPPING
+        test_preds = hard_transform_survival(times, flatten_preds)
+        test_preds = np.array([inpred for obs,inpred in zip(test_y,test_preds) if obs[0]==1])
+
+        #test_y_without_censored must be a structured array with the first field being a binary class
+        # event indicator and the second field the time of the event/censoring
+
+        b_times, b_score = brier_score(train_y, test_y_without_censored, test_preds, times)
         evals['brier_scores'] = {"time": [bt for bt in b_times], "Brier": [br for br in b_score]}
         evals['Max_brier_HM'] = np.max(b_score)
 
-        roc_pt, mean_roc = cumulative_dynamic_auc(train_y, test_y, -test_preds, times)
+        integrated_brier_score_value = integrated_brier_score(train_y, test_y_without_censored, test_preds, times)
+        evals['IBS_HM'] = integrated_brier_score_value
+
+        # sigmoid t=1%
+        test_preds = sigmoid_survival_batch(times, flatten_preds, tau=max(times)/100)
+        test_preds = np.array([inpred for obs,inpred in zip(test_y,test_preds) if obs[0]==1])
+
+
+        roc_pt, mean_roc = cumulative_dynamic_auc(train_y, test_y_without_censored, -test_preds, times)
         evals['roc_auc_list'] = {"time": [bt for bt in times], "ROC": [br for br in roc_pt]}
         evals['mean_roc'] = mean_roc
 
-        integrated_brier_score_value = integrated_brier_score(train_y, test_y, test_preds, times)
-        evals['IBS_HM'] = integrated_brier_score_value
-
-        test_preds = sigmoid_survival_batch(times, flatten_preds, tau=max(times)/100)
-        integrated_brier_score_value = integrated_brier_score(train_y, test_y, test_preds, times)
+        integrated_brier_score_value = integrated_brier_score(train_y, test_y_without_censored, test_preds, times)
         evals['IBS'] = integrated_brier_score_value
-        b_times, b_score = brier_score(train_y, test_y, test_preds, times)
+        b_times, b_score = brier_score(train_y, test_y_without_censored, test_preds, times)
         evals['Max_brier'] = np.max(b_score)
+
+        # sigmoid t=1
+        test_preds_s1 = sigmoid_survival_batch(times, flatten_preds, tau=1)
+        test_preds_s1 = np.array([inpred for obs, inpred in zip(test_y, test_preds_s1) if obs[0] == 1])
+        integrated_brier_score_value = integrated_brier_score(train_y, test_y_without_censored, test_preds_s1, times)
+        evals['IBS_t1'] = integrated_brier_score_value
+        b_times, b_score = brier_score(train_y, test_y_without_censored, test_preds_s1, times)
+        evals['Max_brier_t1'] = np.max(b_score)
+
+        # sigmoid t=5%
+        test_preds_s1 = sigmoid_survival_batch(times, flatten_preds, tau=5*max(times)/100)
+        test_preds_s1 = np.array([inpred for obs, inpred in zip(test_y, test_preds_s1) if obs[0] == 1])
+        integrated_brier_score_value = integrated_brier_score(train_y, test_y_without_censored, test_preds_s1, times)
+        evals['IBS_t5perc'] = integrated_brier_score_value
+        b_times, b_score = brier_score(train_y, test_y_without_censored, test_preds_s1, times)
+        evals['Max_brier_t5perc'] = np.max(b_score)
+
+        # sigmoid t=5%
+        test_preds_s1 = sigmoid_survival_batch(times, flatten_preds, tau=10 * max(times) / 100)
+        test_preds_s1 = np.array([inpred for obs, inpred in zip(test_y, test_preds_s1) if obs[0] == 1])
+        integrated_brier_score_value = integrated_brier_score(train_y, test_y_without_censored, test_preds_s1, times)
+        evals['IBS_t10perc'] = integrated_brier_score_value
+        b_times, b_score = brier_score(train_y, test_y_without_censored, test_preds_s1, times)
+        evals['Max_brier_t10perc'] = np.max(b_score)
+
+        test_preds_s1 = sigmoid_survival_batch(times, flatten_preds, tau=20 * max(times) / 100)
+        test_preds_s1 = np.array([inpred for obs, inpred in zip(test_y, test_preds_s1) if obs[0] == 1])
+        integrated_brier_score_value = integrated_brier_score(train_y, test_y_without_censored, test_preds_s1, times)
+        evals['IBS_t20perc'] = integrated_brier_score_value
+        b_times, b_score = brier_score(train_y, test_y_without_censored, test_preds_s1, times)
+        evals['Max_brier_t20perc'] = np.max(b_score)
         # evals["IBR_bins"]=self.IBR_bins(train_y, test_y, test_preds, times, n=10)
 
         return evals, max_rul

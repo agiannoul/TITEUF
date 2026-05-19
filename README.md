@@ -36,13 +36,14 @@ conda activate unifiedSA
 ### Data
 
 Download the zip file containing the preprocessed datasets 
-from [this link](https://drive.google.com/file/d/1nTtM-EyTJoMZPveRrjDHXc1TLWQ7sGs0/view?usp=sharing) 
+from [this link](https://drive.google.com/file/d/1Wv6U3noDglo5TlJtsbbxvFM_JbgKec_V/view?usp=sharing) 
 and extract its contents into the `Data/` directory of the repository.
 
 Datasets included:
 - HNEI data from [here](https://github.com/ignavinuales/Battery_RUL_Prediction/tree/main/Datasets/HNEI_Processed)
 - Azure data from [here](https://www.kaggle.com/datasets/arnabbiswas1/microsoft-azure-predictive-maintenance)
 - SCANIA data from [here](https://researchdata.se/en/catalogue/dataset/2024-34)
+- PBCv2 data from [here](https://github.com/autonlab/auton-survival/blob/master/auton_survival/datasets/pbc2.csv)
 
 
 
@@ -70,7 +71,7 @@ http://localhost:5011
 
 ## Plotting and Result Exploration
 
-The `plot_utils.py` script provides a command-line interface (CLI) for generating all evaluation figures used in the study. All plots assume that the MLflow server is already running.
+The `plot_utils.py` script provides a command-line interface (CLI) for evaluation figures used in the study.
 
 ### Usage
 
@@ -191,35 +192,12 @@ python run_sa.py --dataset SCANIA --method_name CoxPH
 ---
 ## Censoring Experiments
 
-**For RUL Models**
-```bash
-python censoring_rul_experiment.py --method_name <method_name> --level <level> --dataset_version <method_name>
-```
-**For SA Models**
-```bash
-python censoring_rul_experiment.py --method_name <method_name> --level <level> --dataset_version <method_name>
-```
+Run `censoring_experiments.py` to execute the censoring experiments for a specific method and dataset.
 
-**Arguments**
-
-* `--method_name`: same as before for RUL and SA models
-* `--level`: Level of censoring to apply (1,2,3) corresponding to 25%, 50%, and 75% censoring
-* `--dataset_version`: which of the five versions of the datasets to use (1,2,3,4,5)
-
-**Generating Figure 8**
-```bash
-python censoring_plot.py
-```
 ## Fixed Threshold experiments
 
-Running the below script will create a new experiment in mlflow with the name in form:`SA <dataset>05 <method_name>`.
-```bash
-python SA_threshold_test.py --method_name <method_name> --dataset <dataset>
-```
+By default the evaluation will produce results for the different thresholding methods.
 
-```bash
-python plot_utils.py --plot calibration
-```
 
 ## GPU Support
 
@@ -250,3 +228,4 @@ conda activate <environment_name>
 ## 🎉 Acknowledgement
 We appreciate the following github repos a lot for their valuable code base:
 * https://github.com/ARM-software/mango
+* https://github.com/apapadoi/tsad-for-pdm

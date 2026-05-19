@@ -10,6 +10,8 @@ def sigmoid_survival_batch(times, rhat_batch, tau=1):
     all_survivals = []
     for rhat in rhat_batch:
         survival = sigmoid_survival(times, rhat, tau)
+        # if survival[-1] > 0:
+        #     survival[-1] = 0
         all_survivals.append(survival)
     return np.array(all_survivals)
 
@@ -62,6 +64,8 @@ def hard_transform_survival(times, flatten_preds):
                 surv_pred.append(1.0)
             else:
                 surv_pred.append(0.0)
+        # if surv_pred[-1] > 0:
+        #     surv_pred[-1] = 0
         test_preds.append(surv_pred)
     test_preds = np.array(test_preds)
     return test_preds
